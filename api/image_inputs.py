@@ -287,7 +287,7 @@ def _download_image_url(url: str) -> ImageInput:
     return data, _filename_from_url(parsed.path, mime_type), mime_type
 
 
-async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
+async def read_image_sources(sources: list[ImageSource], runner=run_in_threadpool) -> list[ImageInput]:
     """读取图片来源：上传文件直接读取，URL 下载后统一返回图片元组。"""
     images: list[ImageInput] = []
     for source in sources:
@@ -303,7 +303,7 @@ async def read_image_sources(sources: list[ImageSource]) -> list[ImageInput]:
                 raise HTTPException(status_code=400, detail={"error": "image file is empty"})
             images.append((image_data, source.filename or "image.png", source.content_type or "image/png"))
             continue
-        images.append(await run_in_threadpool(_download_image_url, source))
+        images.append(await runner(_download_image_url, source))
     if not images:
         raise HTTPException(status_code=400, detail={"error": "image file or image_url is required"})
     return images

@@ -9,6 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
+from services.image_execution import ImageCapacityExceeded, ImageSlot, image_execution
 from services.log_service import LoggedCall
 from services.protocol import (
     anthropic_v1_messages,
@@ -69,12 +70,46 @@ class EditableFileTaskRequest(BaseModel):
     client_task_id: str | None = None
 
 
-async def filter_or_log(call: LoggedCall, text: str) -> None:
+async def filter_or_log(call: LoggedCall, text: str, runner=run_in_threadpool) -> None:
     try:
-        await run_in_threadpool(check_request, text)
+        await runner(check_request, text)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
+
+
+def _acquire_image_slot() -> ImageSlot:
+    try:
+        return image_execution.acquire()
+    except ImageCapacityExceeded:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": {
+                    "message": "image service is busy, please retry later",
+                    "type": "rate_limit_error",
+                    "param": None,
+                    "code": "image_capacity_exceeded",
+                }
+            },
+            headers={"Retry-After": "5"},
+        ) from None
+
+
+async def _run_image_call(call: LoggedCall, handler, payload: dict[str, object], slot: ImageSlot):
+    try:
+        result = await call.run(
+            handler,
+            payload,
+            runner=image_execution.run,
+            stream_wrapper=lambda stream: image_execution.stream(stream, slot),
+        )
+    except BaseException:
+        slot.release()
+        raise
+    if not getattr(result, "body_iterator", None):
+        slot.release()
+    return result
 
 
 def create_router() -> APIRouter:
@@ -95,11 +130,16 @@ def create_router() -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        payload = body.model_dump(mode="python")
-        payload["base_url"] = resolve_image_base_url(request)
-        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
-        await filter_or_log(call, body.prompt)
-        return await call.run(openai_v1_image_generations.handle, payload)
+        slot = _acquire_image_slot()
+        try:
+            payload = body.model_dump(mode="python")
+            payload["base_url"] = resolve_image_base_url(request)
+            call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
+            await filter_or_log(call, body.prompt, image_execution.run)
+            return await _run_image_call(call, openai_v1_image_generations.handle, payload, slot)
+        except BaseException:
+            slot.release()
+            raise
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -107,16 +147,21 @@ def create_router() -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        payload, image_sources, mask_sources = await parse_image_edit_request(request)
-        prompt = str(payload["prompt"])
-        model = str(payload["model"])
-        call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
-        await filter_or_log(call, prompt)
-        payload["images"] = await read_image_sources(image_sources)
-        if mask_sources:
-            payload["mask"] = await read_image_sources(mask_sources)
-        payload["base_url"] = resolve_image_base_url(request)
-        return await call.run(openai_v1_image_edit.handle, payload)
+        slot = _acquire_image_slot()
+        try:
+            payload, image_sources, mask_sources = await parse_image_edit_request(request)
+            prompt = str(payload["prompt"])
+            model = str(payload["model"])
+            call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
+            await filter_or_log(call, prompt, image_execution.run)
+            payload["images"] = await read_image_sources(image_sources, runner=image_execution.run)
+            if mask_sources:
+                payload["mask"] = await read_image_sources(mask_sources, runner=image_execution.run)
+            payload["base_url"] = resolve_image_base_url(request)
+            return await _run_image_call(call, openai_v1_image_edit.handle, payload, slot)
+        except BaseException:
+            slot.release()
+            raise
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):

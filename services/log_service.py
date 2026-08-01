@@ -224,11 +224,13 @@ class LoggedCall:
     request_text: str = ""
     request_shape: dict[str, int] | None = None
 
-    async def run(self, handler, *args, sse: str = "openai"):
+    async def run(self, handler, *args, sse: str = "openai", runner=None, stream_wrapper=None):
         from services.protocol.conversation import ImageGenerationError
 
+        run_handler = runner or run_in_threadpool
+
         try:
-            result = await run_in_threadpool(handler, *args)
+            result = await run_handler(handler, *args)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
@@ -250,7 +252,7 @@ class LoggedCall:
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
         try:
-            has_first, first = await run_in_threadpool(_next_item, result)
+            has_first, first = await run_handler(_next_item, result)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
@@ -265,8 +267,14 @@ class LoggedCall:
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
             self.log("流式调用结束")
-            return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+            body = sender(())
+            if stream_wrapper is not None:
+                body = stream_wrapper(body)
+            return StreamingResponse(body, media_type="text/event-stream")
+        body = sender(self.stream(itertools.chain([first], result)))
+        if stream_wrapper is not None:
+            body = stream_wrapper(body)
+        return StreamingResponse(body, media_type="text/event-stream")
 
     def stream(self, items):
         urls: list[str] = []
