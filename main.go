@@ -62,7 +62,7 @@ func main() {
 	handler.NewOverviewHandler(service.NewOverviewService(repo)).RegisterRoutes(admin)
 	v1 := engine.Group("/v1", identity)
 	handler.NewCatalogHandler(catalogService, cfg).RegisterRoutes(v1)
-	handler.NewAIHandler(aiService, logService).RegisterRoutes(v1)
+	handler.NewAIHandler(aiService, logService, cfg.ImageMaxWorkers).RegisterRoutes(v1)
 	handler.NewAudioHandler(audioService, logService).RegisterRoutes(v1)
 	engine.NoRoute(handler.Static("web"))
 	repo.FailRunningTasks(context.Background(), time.Now().UTC())

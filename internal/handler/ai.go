@@ -23,16 +23,17 @@ import (
 )
 
 type AIHandler struct {
-	service *service.AIService
-	logs    *service.LogService
+	service    *service.AIService
+	logs       *service.LogService
+	imageSlots chan struct{}
 }
 
-func NewAIHandler(ai *service.AIService, logs *service.LogService) *AIHandler {
-	return &AIHandler{service: ai, logs: logs}
+func NewAIHandler(ai *service.AIService, logs *service.LogService, imageMaxWorkers int) *AIHandler {
+	return &AIHandler{service: ai, logs: logs, imageSlots: make(chan struct{}, imageMaxWorkers)}
 }
 func (h *AIHandler) RegisterRoutes(router *gin.RouterGroup) {
-	router.POST("/images/generations", h.images)
-	router.POST("/images/edits", h.images)
+	router.POST("/images/generations", h.limitImageRequests, h.images)
+	router.POST("/images/edits", h.limitImageRequests, h.images)
 	router.POST("/chat/completions", h.chat)
 	router.POST("/responses", h.responses)
 	router.POST("/messages", h.messages)
@@ -467,6 +468,23 @@ func (h *AIHandler) messages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": id, "type": "message", "role": "assistant", "content": content, "model": model, "stop_reason": stop, "stop_sequence": nil, "usage": gin.H{"input_tokens": service.CountMessageTokens(messages, model), "output_tokens": service.CountTextTokens(text, model)}})
 }
 
+func (h *AIHandler) limitImageRequests(c *gin.Context) {
+	select {
+	case h.imageSlots <- struct{}{}:
+		defer func() { <-h.imageSlots }()
+		c.Next()
+	default:
+		c.Header("Retry-After", "5")
+		writeImageError(c, &service.ImageError{
+			Err:    errors.New("image service is busy, please retry later"),
+			Status: http.StatusTooManyRequests,
+			Type:   "rate_limit_error",
+			Code:   "image_capacity_exceeded",
+		})
+		c.Abort()
+	}
+}
+
 func (h *AIHandler) images(c *gin.Context) {
 	request, err := parseImageRequest(c)
 	if err != nil {
@@ -785,6 +803,7 @@ func imageReferences(value any) []imageReference {
 	}
 	return nil
 }
+
 // 图片地址只允许访问公网，拨号时校验解析后的真实地址，重定向和域名解析到内网同样会被拒绝
 var imageFetchClient = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 10 * time.Second, Control: func(network string, address string, conn syscall.RawConn) error {
 	host, _, _ := net.SplitHostPort(address)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -11,28 +12,30 @@ import (
 )
 
 type Config struct {
-	APIKey         string          `yaml:"api-key" json:"-"`
-	DatabaseURL    string          `yaml:"-" json:"-"`
-	BaseURL        string          `yaml:"base_url" json:"base_url"`
-	Proxy          string          `yaml:"proxy" json:"proxy"`
-	SystemPrompt   string          `yaml:"global_system_prompt" json:"global_system_prompt"`
-	DefaultModel   string          `yaml:"default_upstream_model_name" json:"default_upstream_model_name"`
-	ThinkingEffort string          `yaml:"default_thinking_effort" json:"default_thinking_effort"`
-	ImageModelName string          `yaml:"image_model_name" json:"image_model_name"`
-	Account        AccountSettings `yaml:"account" json:"account"`
-	Image          ImageSettings   `yaml:"image" json:"image"`
-	ProxyRuntime   ProxyRuntime    `yaml:"proxy_runtime" json:"proxy_runtime"`
-	Cache          CacheSettings   `yaml:"chat_completion_cache" json:"chat_completion_cache"`
-	MaxUploadMB    int64           `yaml:"max_upload_mb" json:"max_upload_mb"`
-	Port           string          `yaml:"-" json:"-"`
-	Version        string          `yaml:"-" json:"-"`
-	path           string
-	raw            map[string]any
-	mu             sync.RWMutex
+	APIKey          string          `yaml:"api-key" json:"-"`
+	DatabaseURL     string          `yaml:"-" json:"-"`
+	BaseURL         string          `yaml:"base_url" json:"base_url"`
+	Proxy           string          `yaml:"proxy" json:"proxy"`
+	SystemPrompt    string          `yaml:"global_system_prompt" json:"global_system_prompt"`
+	DefaultModel    string          `yaml:"default_upstream_model_name" json:"default_upstream_model_name"`
+	ThinkingEffort  string          `yaml:"default_thinking_effort" json:"default_thinking_effort"`
+	ImageModelName  string          `yaml:"image_model_name" json:"image_model_name"`
+	Account         AccountSettings `yaml:"account" json:"account"`
+	Image           ImageSettings   `yaml:"image" json:"image"`
+	ProxyRuntime    ProxyRuntime    `yaml:"proxy_runtime" json:"proxy_runtime"`
+	Cache           CacheSettings   `yaml:"chat_completion_cache" json:"chat_completion_cache"`
+	MaxUploadMB     int64           `yaml:"max_upload_mb" json:"max_upload_mb"`
+	Port            string          `yaml:"-" json:"-"`
+	Version         string          `yaml:"-" json:"-"`
+	ImageMaxWorkers int             `yaml:"-" json:"-"`
+	path            string
+	raw             map[string]any
+	mu              sync.RWMutex
 }
 
 // 未配置对外生图模型名称时使用的名称
 const defaultImageModelName = "gpt-image-2.6"
+const defaultImageMaxWorkers = 100
 
 type AccountSettings struct {
 	RefreshIntervalMinute int  `yaml:"refresh_interval_minute" json:"refresh_interval_minute"`
@@ -117,6 +120,10 @@ func Load(path string) (*Config, error) {
 	}
 	if value := os.Getenv("PORT"); value != "" {
 		cfg.Port = value
+	}
+	cfg.ImageMaxWorkers = defaultImageMaxWorkers
+	if workers, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CHATGPT2API_IMAGE_MAX_WORKERS"))); err == nil {
+		cfg.ImageMaxWorkers = max(1, workers)
 	}
 	if data, err := os.ReadFile("VERSION"); err == nil && strings.TrimSpace(string(data)) != "" {
 		cfg.Version = strings.TrimSpace(string(data))
@@ -266,4 +273,3 @@ func preserveClearance(current any, incoming any) any {
 	delete(clearance, "has_cf_clearance")
 	return next
 }
-

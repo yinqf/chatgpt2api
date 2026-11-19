@@ -28,6 +28,8 @@ docker compose up -d
 
 需要持久保留 `config.yaml`、`.env`、`data/`。数据库默认 SQLite（`data/chatgpt2api.db`），可通过 `.env` 的 `DATABASE_URL` 切换为 PostgreSQL / MySQL。
 
+使用此 fork 构建的镜像时，`/v1/images/generations` 和 `/v1/images/edits` 默认共享每进程 100 个并发请求名额。可在 `.env` 中设置 `CHATGPT2API_IMAGE_MAX_WORKERS` 并重新创建容器来调整上限。满载时返回 HTTP `429`，错误码为 `image_capacity_exceeded`，并带有 `Retry-After: 5`。单账号并发继续由 `image.account_concurrency` 控制。
+
 ## WARP / FlareSolverr 稳定代理
 
 带 `.warp` 的编排文件用于缓解图片链路的 Cloudflare 拦截，会同时启动：

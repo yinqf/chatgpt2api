@@ -2,16 +2,77 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/basketikun/chatgpt2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
+
+func TestImageRequestCapacityAfterStreamCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := NewAIHandler(nil, nil, 1)
+		router := gin.New()
+		h.RegisterRoutes(router.Group("/v1"))
+		router.POST("/test-stream", h.limitImageRequests, func(c *gin.Context) {
+			startSSE(c)
+			<-c.Request.Context().Done()
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stream := httptest.NewRecorder()
+		go router.ServeHTTP(stream, httptest.NewRequestWithContext(ctx, http.MethodPost, "/test-stream", nil))
+		synctest.Wait()
+		if !stream.Flushed {
+			t.Fatal("stream did not start")
+		}
+
+		paths := []string{"/v1/images/generations", "/v1/images/edits"}
+		for _, path := range paths {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{")))
+			if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "5" {
+				t.Fatalf("%s: status %d, Retry-After %q, body %s", path, response.Code, response.Header().Get("Retry-After"), response.Body)
+			}
+			var payload struct {
+				Error struct {
+					Type string `json:"type"`
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Error.Code != "image_capacity_exceeded" || payload.Error.Type != "rate_limit_error" {
+				t.Fatalf("%s: unexpected error response %s", path, response.Body)
+			}
+		}
+
+		chat := httptest.NewRecorder()
+		router.ServeHTTP(chat, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{")))
+		if chat.Code != http.StatusBadRequest {
+			t.Fatalf("chat validation was interrupted by image capacity: status %d, body %s", chat.Code, chat.Body)
+		}
+
+		cancel()
+		synctest.Wait()
+		for _, path := range paths {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{")))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("%s: expected validation to run after slot release, got %d with %s", path, response.Code, response.Body)
+			}
+		}
+	})
+}
 
 func TestParseImageRequestJSON(t *testing.T) {
 	png := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("png"))
